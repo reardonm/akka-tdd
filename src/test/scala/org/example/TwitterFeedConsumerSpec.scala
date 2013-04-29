@@ -4,7 +4,6 @@ import org.scalatest.{WordSpec, BeforeAndAfterAll}
 import org.scalatest.matchers.ShouldMatchers
 import akka.actor.{Props, ActorSystem}
 import akka.testkit.{TestKit, TestActorRef, ImplicitSender}
-import akka.dispatch.Await
 
 class TwitterFeedConsumerSpec extends TestKit(ActorSystem("TwitterFeedSpec"))
   with ImplicitSender
@@ -27,12 +26,22 @@ class TwitterFeedConsumerSpec extends TestKit(ActorSystem("TwitterFeedSpec"))
     }
 
     "stopped" should {
-      "do nothing for stop message" in pending
-      "change to reading state for hashtag message" in  pending
+      "do nothing for stop message" in {
+        val actorRef = TestActorRef[TwitterFeedConsumer]
+        actorRef ! Stop
+        actorRef ! Busy_?
+        expectMsg(No)
+      }
+      "change to reading state for hashtag message" in {
+        val actorRef = TestActorRef[TwitterFeedConsumer]
+        actorRef ! Start("foo")
+        actorRef ! Busy_?
+        expectMsg(Yes("foo"))
+      }
+    }
+
     "reading" should {
       "send user for each tweet to the UserRegistry actor" in pending
-      }
-
       "change to stopped state for stop message" in pending
     }
   }
