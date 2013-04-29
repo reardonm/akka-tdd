@@ -1,9 +1,10 @@
 package org.example
 
 import org.scalatest._
+import org.scalatest.matchers.ShouldMatchers
 
 class UserRegistrySpec extends WordSpec
-  with MustMatchers
+  with ShouldMatchers
   with BeforeAndAfterAll {
 
   "UserRegistry" should {

@@ -1,10 +1,14 @@
 package org.example
 
-import org.scalatest._
+import org.scalatest.{WordSpec, BeforeAndAfterAll}
+import org.scalatest.matchers.ShouldMatchers
+import akka.actor.ActorSystem
+import akka.testkit.{ImplicitSender, TestKit}
 
-
-class TwitterFeedConsumerSpec  extends WordSpec
-  with MustMatchers
+class TwitterFeedConsumerSpec extends TestKit(ActorSystem("TwitterFeedSpec"))
+  with ImplicitSender
+  with WordSpec
+  with ShouldMatchers
   with BeforeAndAfterAll {
 
   "TwitterFeedConsumer" when {
