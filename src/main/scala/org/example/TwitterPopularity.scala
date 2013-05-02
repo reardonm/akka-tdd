@@ -3,11 +3,12 @@ package org.example
 import akka.actor._
 import akka.pattern.{ ask, pipe }
 import akka.dispatch.Await
+import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import twitter4j.conf.ConfigurationBuilder
 import twitter4j._
-import akka.util.Timeout
-import twitter4j.Status
+import scala.collection.JavaConversions._
+import org.example.TwitterPopularityProtocol.VoteFor
 
 
 object TwitterFeedProtcol {
@@ -65,17 +66,32 @@ object UserRegistryProtocol {
   case class AddUser(user: User)
 }
 
-class UserRegistry extends Actor {
+class UserRegistry(twitter: Twitter, twitterPopularity: ActorRef) extends Actor {
   import UserRegistryProtocol._
+  import TwitterPopularityProtocol._
 
   var users: Map[Long,User] = Map.empty
-  def hasUser(user: User) = users.contains(user.getId)
 
   def receive = {
-    case AddUser(user) => users = users + (user.getId -> user)
+    case AddUser(user) =>
+      if (!users.contains(user.getId)) {
+        val ids = twitter.getFriendsIDs(user.getId, 0)  // TODO: cursor?
+        ids.getIDs.foreach(i => twitterPopularity ! VoteFor(i))
+        users = users + (user.getId -> user)
+      }
   }
 }
 
+object TwitterPopularityProtocol {
+  case class VoteFor(id: Long)
+}
+
+class TwitterPopularity extends Actor {
+  def receive = {
+    case VoteFor(id) =>
+      println(id)
+  }
+}
 
 object TwitterPopularity extends App {
   import akka.util.duration._
@@ -87,15 +103,18 @@ object TwitterPopularity extends App {
     val config = ConfigFactory.load()
     val actorSystem = ActorSystem("TwitterPopularity", config)
 
-    val t4jConfBuilder = new ConfigurationBuilder()
+    val t4jConf = new ConfigurationBuilder()
       .setDebugEnabled(config.getBoolean("twitter.stream.debug"))
       .setOAuthConsumerKey(config.getString("twitter.oauth.consumerKey"))
       .setOAuthConsumerSecret(config.getString("twitter.oauth.consumerSecret"))
       .setOAuthAccessToken(config.getString("twitter.oauth.accessToken"))
       .setOAuthAccessTokenSecret(config.getString("twitter.oauth.accessTokenSecret"))
-    val twitterStream = new TwitterStreamFactory(t4jConfBuilder.build()).getInstance()
+      .build()
+    val twitterStream = new TwitterStreamFactory(t4jConf).getInstance()
+    val twitterApi = new TwitterFactory(t4jConf).getInstance()
 
-    val statusListener = actorSystem.actorOf(Props[UserRegistry])
+    val twitterPopularity = actorSystem.actorOf(Props[TwitterPopularity])
+    val statusListener = actorSystem.actorOf(Props(new UserRegistry(twitterApi, twitterPopularity)))
     val streamConsumer = actorSystem.actorOf(Props(new TwitterFeedConsumer(twitterStream, statusListener)))
 
     sys.addShutdownHook({
