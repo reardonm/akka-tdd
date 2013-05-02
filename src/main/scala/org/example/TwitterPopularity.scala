@@ -3,12 +3,12 @@ package org.example
 import akka.actor._
 import akka.pattern.{ ask, pipe }
 import akka.dispatch.Await
-import akka.util.Timeout
+import akka.util.{Duration, Timeout}
+import akka.util.duration._
 import com.typesafe.config.ConfigFactory
 import twitter4j.conf.ConfigurationBuilder
 import twitter4j._
 import scala.collection.JavaConversions._
-import org.example.TwitterPopularityProtocol.VoteFor
 
 
 object TwitterFeedProtcol {
@@ -63,33 +63,74 @@ class TwitterFeedConsumer(twitterStream: TwitterStream, destination: ActorRef) e
 }
 
 object UserRegistryProtocol {
+  case object CheckLimits
   case class AddUser(user: User)
+  case class RetrieveFriends(userId: Long)
 }
 
-class UserRegistry(twitter: Twitter, twitterPopularity: ActorRef) extends Actor {
+class UserRegistry(twitter: Twitter, voteActor: ActorRef) extends Actor with ActorLogging with Stash {
   import UserRegistryProtocol._
   import TwitterPopularityProtocol._
 
-  var users: Map[Long,User] = Map.empty
+  val config = context.system.settings.config
+  val rateLimitCheckInterval = Duration.fromNanos(config.getNanoseconds("twitter.api.rate-limit-check"))
 
-  def receive = {
-    case AddUser(user) =>
-      if (!users.contains(user.getId)) {
-        val ids = twitter.getFriendsIDs(user.getId, 0)  // TODO: cursor?
-        ids.getIDs.foreach(i => twitterPopularity ! VoteFor(i))
-        users = users + (user.getId -> user)
+  var users: Set[Long] = Set.empty
+
+  override def preStart() {
+    super.preStart()
+    self ! CheckLimits
+  }
+
+  def inactive: Receive = {
+    case CheckLimits =>
+      // check back in 5
+      context.system.scheduler.scheduleOnce(rateLimitCheckInterval) {
+        self ! CheckLimits
       }
+      val limits = twitter.getRateLimitStatus("friends").toMap
+      limits.get("/friends/list").filter(_.getRemaining > 0).foreach { s =>
+        log.info("Under Twitter rate-limit for friends API: {}", s)
+        unstashAll()
+        context.become(active)
+      }
+    case AddUser(user) => addUser(user.getId)
+    case RetrieveFriends(_) => stash()   // TODO: persistent stash?
+  }
+
+  def active: Receive = {
+    case CheckLimits =>
+    case AddUser(user) => addUser(user.getId)
+    case RetrieveFriends(userId) =>
+      val friends = twitter.getFriendsList(userId, -1)  // TODO: cursor?
+      log.info("Retrieve friends {} - Rate-limit: {}", userId, friends.getRateLimitStatus)
+      friends.toList.foreach(f => voteActor ! VoteFor(f))
+      Option(friends.getRateLimitStatus).filter(_.getRemaining < 1).foreach { s =>
+        log.warning("Over Twitter rate-limit for friends API: {}", s)
+        context.become(inactive)
+      }
+  }
+
+  def receive = inactive
+
+  private def addUser(id: Long) {
+    if (!users.contains(id)) {
+      log.info("Add user {}", id)
+      self ! RetrieveFriends(id)
+      users = users + id
+    }
   }
 }
 
 object TwitterPopularityProtocol {
-  case class VoteFor(id: Long)
+  case class VoteFor(id: User)
 }
 
-class TwitterPopularity extends Actor {
+class TwitterPopularity extends Actor with ActorLogging {
+  import TwitterPopularityProtocol._
   def receive = {
-    case VoteFor(id) =>
-      println(id)
+    case VoteFor(user) =>
+      log.info(">>>>>>>>>>>>>>>>>>  {} - {}" + user.getId, user.getScreenName)
   }
 }
 
@@ -114,7 +155,8 @@ object TwitterPopularity extends App {
     val twitterApi = new TwitterFactory(t4jConf).getInstance()
 
     val twitterPopularity = actorSystem.actorOf(Props[TwitterPopularity])
-    val statusListener = actorSystem.actorOf(Props(new UserRegistry(twitterApi, twitterPopularity)))
+    val statusListener = actorSystem.actorOf(Props(new UserRegistry(twitterApi, twitterPopularity))
+      .withDispatcher("twitter.akka.stash-dispatcher"))
     val streamConsumer = actorSystem.actorOf(Props(new TwitterFeedConsumer(twitterStream, statusListener)))
 
     sys.addShutdownHook({
