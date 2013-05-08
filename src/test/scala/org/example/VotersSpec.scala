@@ -15,9 +15,14 @@ import scala.collection.JavaConversions._
 import org.example.VotersProtocol.AddUser
 import org.example.TallyProtocol.VoteFor
 import com.typesafe.config.ConfigFactory
+import java.util
 
-class UserRegistrySpec  extends TestKit(ActorSystem("UserRegistrySpec",
-  ConfigFactory.parseString("""test.stash-dispatcher = "akka.dispatch.UnboundedDequeBasedMailbox"""")))
+class VotersSpec  extends TestKit(ActorSystem("VotersSpec", ConfigFactory.parseString(
+  """
+    |test.stash-dispatcher = "akka.dispatch.UnboundedDequeBasedMailbox"
+    |twitter.file.voters = ""
+    |twitter.file.tally = ""
+    |""".stripMargin)))
   with ImplicitSender
   with WordSpec
   with ShouldMatchers
@@ -31,6 +36,17 @@ class UserRegistrySpec  extends TestKit(ActorSystem("UserRegistrySpec",
     when(u.getId) thenReturn id
     u
   }
+
+  class DummyPagableResponseList(friends: List[User], rateLimitStatus: RateLimitStatus) extends java.util.ArrayList(friends)
+    with PagableResponseList[User] {
+    def getAccessLevel: Int = 0
+    def hasPrevious: Boolean = false
+    def getPreviousCursor: Long = 0L
+    def hasNext: Boolean = true
+    def getNextCursor: Long = 0L
+    def getRateLimitStatus = rateLimitStatus
+  }
+
 
   val rateLimit = Map[String,RateLimitStatus]("/friends/list" -> mock[RateLimitStatus])
 
@@ -51,14 +67,16 @@ class UserRegistrySpec  extends TestKit(ActorSystem("UserRegistrySpec",
         val user3 = mock[User]
         when(user3.getId) thenReturn (userId3)
 
-        val u1friends = mock[PagableResponseList[User]]
-        when(u1friends.iterator()) thenReturn (List(user2,user3).iterator)
+        val rateLimit = mock[RateLimitStatus]
+        when(rateLimit.getRemaining) thenReturn (5)
+        when(rateLimit.getSecondsUntilReset) thenReturn (10)
 
-        val u2friends = mock[PagableResponseList[User]]
-        when(u1friends.iterator()) thenReturn (List(user1,user3).iterator)
+        val u1friends = new DummyPagableResponseList(List(user2,user3), rateLimit)
+        val u2friends = new DummyPagableResponseList(List(user1,user3), rateLimit)
 
         when(twitter.getFriendsList(userId1, -1)) thenReturn (u1friends)
         when(twitter.getFriendsList(userId2, -1)) thenReturn (u2friends)
+        when(twitter.getRateLimitStatus("friends")) thenReturn (Map("/friends/list" -> rateLimit))
 
         val testProbe = TestProbe()
         val actorRef = TestActorRef(Props(new Voters(twitter, testProbe.ref))
@@ -66,29 +84,14 @@ class UserRegistrySpec  extends TestKit(ActorSystem("UserRegistrySpec",
 
         val actor = actorRef.underlyingActor.asInstanceOf[Voters]
         actor.voters should be ('empty)
+
         actorRef ! AddUser(dummyUser(userId1))
-        //expectMsg(RetrieveFriends(userId1))  // TODO why doesn't this work
 
         actorRef ! AddUser(dummyUser(userId2))
-        //expectMsg(RetrieveFriends(userId2))
 
         actorRef ! AddUser(dummyUser(userId1))
-        //expectNoMsg()
-
-        //testProbe.expectMsgAllOf(VoteFor(userId1),VoteFor(userId2),VoteFor(userId3),VoteFor(userId3))
-//        testProbe.expectMsgType[VoteFor] // TODO ick
-//        testProbe.expectMsgType[VoteFor]
-//        testProbe.expectMsgType[VoteFor]
-
-        actor.voters should contain (userId2)
-        actor.voters.size should be (2)
       }
-      "Become inactive if over the rate-limit" in {
-        val testProbe = TestProbe()
-        val actorRef = TestActorRef(Props(new Voters(twitter, testProbe.ref)).withDispatcher("test.stash-dispatcher"))
-
-
-      }
+      "Become inactive if over the rate-limit" in pending
     }
     "over Twitter rate-limits" should {
       "Stash RetrieveFriends message" in pending

@@ -1,7 +1,6 @@
 package org.example
 
 import akka.actor._
-import akka.pattern.{ask, gracefulStop}
 import akka.dispatch.{Future, Await}
 import akka.util.duration._
 import akka.util.{Duration, Timeout}
@@ -18,16 +17,15 @@ import resource._
 
 
 object TwitterFeedProtcol {
-  case class Start(hashTag: String*)
+  case class Start(filter: List[String])
   case object Stop
   case object Busy_?
   case object Stopped
-  case class Streaming(hashTag: String*)
+  case class Streaming(filter: List[String])
 }
 
 class TwitterStreamConsumer(twitterStream: TwitterStream) extends Actor with ActorLogging {
   import TwitterFeedProtcol._
-  import VotersProtocol._
 
   override def postStop() {
     super.postStop()
@@ -35,23 +33,23 @@ class TwitterStreamConsumer(twitterStream: TwitterStream) extends Actor with Act
   }
 
   def stopped: Receive = {
-    case Start(hashTag) =>
-      twitterStream.filter(new FilterQuery(0, Array.empty, Array(hashTag)))
-      context.become(started(hashTag))
-      sender ! Streaming(hashTag)
+    case m: Start =>
+      twitterStream.filter(new FilterQuery(0, Array.empty, m.filter.toArray))
+      context.become(started(m.filter))
+      sender ! Streaming(m.filter)
 
     case Busy_? =>
       sender ! Stopped
   }
 
-  def started(hashTag: String): Receive = {
+  def started(filter: List[String]): Receive = {
     case Stop =>
       twitterStream.cleanUp()
       context.become(stopped)
       sender ! Stopped
 
     case Busy_? =>
-      sender ! Streaming(hashTag)
+      sender ! Streaming(filter)
   }
 
   def receive = stopped
@@ -64,11 +62,11 @@ class TwitterStreamListener(voters: ActorRef) extends StatusListener  {
 
   def onStatus(status: Status)  {
     voters ! AddUser(status.getUser)
-    log.info("Tweet\n" + status.getUser.getScreenName + ":\n" + status.getText + "\n\n")
+    log.info("Tweet\n" + status.getUser.getScreenName +":\n" + status.getText + "\n\n")
   }
 
   def onTrackLimitationNotice(numberOfLimitedStatuses: Int) {
-    log.warn("Track limitation notice of {} status", numberOfLimitedStatuses)
+    log.warn("Track limitation notice of " + numberOfLimitedStatuses + " status")
   }
 
   def onException(ex: Exception) {
@@ -76,7 +74,7 @@ class TwitterStreamListener(voters: ActorRef) extends StatusListener  {
   }
 
   def onStallWarning(warning: StallWarning) {
-    log.warn("Stall: {}", warning)
+    log.warn("Stall:" + warning)
   }
 
   def onScrubGeo(userId: Long, upToStatusId: Long) {}
@@ -98,44 +96,47 @@ class Voters(twitter: Twitter, voteActor: ActorRef) extends Actor with ActorLogg
 
   var voters: Set[Long] = Set.empty
 
-  val file = "/tmp/"+classOf[Voters].getCanonicalName
+  val file = context.system.settings.config.getString("twitter.file.voters")
 
   override def preStart() {
     super.preStart()
-    if(new File(file).exists()) {
-      val result = managed(new ObjectInputStream((new FileInputStream(file)))) map {
+    if(file.length > 0 && new File(file).exists()) {
+      val result = managed(new ObjectInputStream(new FileInputStream(file))) map {
         input =>
           input.readObject().asInstanceOf[Set[Long]]
       }
       voters = result.opt.getOrElse(Set.empty)
-      log.info("wrote voters from " + file)
+      log.info("wrote voters from {}", file)
     }
     self ! CheckLimits
   }
 
   override def postStop() {
     super.postStop()
-    val out = new ObjectOutputStream(new FileOutputStream(file))
-    out.writeObject(voters)
-    out.close()
-    log.info("wrote voters to " + file)
+    if (file.length > 0) {
+      val out = new ObjectOutputStream(new FileOutputStream(file))
+      out.writeObject(voters)
+      out.close()
+      log.info("wrote voters to {}", file)
+    }
   }
 
   def receive = inactive
 
   protected def inactive: Receive = {
     case CheckLimits =>
-      val limit = twitter.getRateLimitStatus("friends").toMap
-        .get("/friends/list")
-        .getOrElse(throw new IllegalStateException("No Rate Limit"))
-      log.info("Twitter rate-limit for friends API: {}, Reset in {} secs", limit.getRemaining, limit.getSecondsUntilReset)
-      if (limit.getRemaining > 0) {
-        unstashAll()
-        context.become(active)
-      } else {
-        scheduleNextLimitCheck(limit)
+      Option(twitter.getRateLimitStatus("friends").get("/friends/list")) match {
+        case Some(limit) => {
+          log.info("Twitter rate-limit for friends API: {}, Reset in {} secs", limit.getRemaining, limit.getSecondsUntilReset)
+          if (limit.getRemaining > 0) {
+            unstashAll()
+            context.become(active)
+          } else {
+            scheduleNextLimitCheck(limit)
+          }
+        }
+        case _ => throw new IllegalStateException("No rate limit for friends")
       }
-
     case AddUser(user) => addUser(user.getId)
     case RetrieveFriends(_,_) => stash()
   }
@@ -146,7 +147,7 @@ class Voters(twitter: Twitter, voteActor: ActorRef) extends Actor with ActorLogg
     case RetrieveFriends(userId,cursor) =>
       val friends = twitter.getFriendsList(userId, cursor)
       log.info("Retrieve friends of {}. {}", userId, friends.getRateLimitStatus.getRemaining)
-      friends.toList.foreach(f => voteActor ! VoteFor(f))
+      friends.toList.foreach(voteActor ! VoteFor(_))
       Option(friends.getRateLimitStatus).filter(_.getRemaining < 1).foreach { s =>
         log.warning("Over Twitter rate-limit for friends API: {}", s)
         scheduleNextLimitCheck(s)
@@ -188,26 +189,28 @@ class Tally extends Actor with ActorLogging {
   private var tally: Map[User,Int] = Map.empty
   private var last: String = ""
 
-  val file = "/tmp/"+classOf[Tally].getCanonicalName
+  val file = context.system.settings.config.getString("twitter.file.tally")
 
   override def preStart() {
     super.preStart()
-    if(new File(file).exists()) {
-      val result = managed(new ObjectInputStream((new FileInputStream(file)))) map {
+    if(file.length > 0 && new File(file).exists()) {
+      val result = managed(new ObjectInputStream(new FileInputStream(file))) map {
         input =>
           input.readObject().asInstanceOf[Map[User,Int]]
       }
       tally = result.opt.getOrElse(Map.empty)
-      log.info("read tally from " + file)
+      log.info("read tally from {}", file)
     }
   }
 
   override def postStop() {
     super.postStop()
-    val out = new ObjectOutputStream(new FileOutputStream(file))
-    out.writeObject(tally)
-    out.close()
-    log.info("wrote tally to " + file)
+    if (file.length > 0) {
+      val out = new ObjectOutputStream(new FileOutputStream(file))
+      out.writeObject(tally)
+      out.close()
+      log.info("wrote tally to {}", file)
+    }
   }
 
   def receive = {
@@ -225,6 +228,7 @@ class Tally extends Actor with ActorLogging {
 
 
 object TwitterPopularity extends App {
+  import akka.pattern.{ask, gracefulStop}
   import TwitterFeedProtcol._
   import TallyProtocol._
 
@@ -255,13 +259,13 @@ object TwitterPopularity extends App {
       println("Shutdown")
       Await.result(streamActor ? Stop, 5 seconds)
       // Shut them down gracefully
-      val stopped = List(tallyActor, votersActor, streamActor).map { a => gracefulStop(a, 5.seconds) }
+      val stopped = List(tallyActor, votersActor, streamActor).map { gracefulStop(_, 5.seconds) }
       Await.result(Future.sequence(stopped), 5.seconds)
       actorSystem.shutdown()
     })
 
     val track = args.headOption.getOrElse(config.getString("twitter.stream.track"))
-    streamActor ! Start(track.split(",") :_*)
+    streamActor ! Start(track.split(",").toList)
 
     // Print periodic results
     actorSystem.scheduler.schedule(10 seconds, 10 seconds) {
