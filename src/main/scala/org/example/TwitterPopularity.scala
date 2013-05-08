@@ -219,13 +219,12 @@ class Tally extends Actor with ActorLogging {
       tally = tally + (user -> tally.get(user).map(_+1).getOrElse(1))
     case Top(n) =>
       val topN = tally.toSeq.sortBy(_._2).takeRight(n)
-      var lines = topN.reverse.map(x => x._2 + " " + x._1.getScreenName + " (" + x._1.getName + ")").mkString("\n")
-      var s = "======================("+tally.size +" votes)\n"+lines
+      val lines = topN.reverse.map(x => x._2 + " " + x._1.getScreenName + " (" + x._1.getName + ")").mkString("\n")
+      val s = "======================("+tally.size +" votes)\n"+lines
       if (last != s && tally.size > 0) println(s)
       last = s
   }
 }
-
 
 object TwitterPopularity extends App {
   import akka.pattern.{ask, gracefulStop}
