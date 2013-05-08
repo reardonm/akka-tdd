@@ -1,17 +1,14 @@
 package org.example
 
-import akka.actor.{Props, ActorSystem}
-import akka.testkit.{TestKit, TestActorRef, ImplicitSender}
+import akka.testkit.TestActorRef
 import org.scalatest.mock.MockitoSugar
 import org.mockito.Mockito._
-import org.mockito.Matchers._
 import org.scalatest.{ParallelTestExecution, WordSpec, BeforeAndAfterAll}
 import org.scalatest.matchers.ShouldMatchers
-import twitter4j.{FilterQuery, StatusListener, TwitterStream}
+import twitter4j._
+import akka.actor.Props
 
-class TwitterFeedConsumerSpec extends TestKit(ActorSystem("TwitterFeedSpec"))
-  with ImplicitSender
-  with WordSpec
+class TwitterFeedConsumerSpec extends WordSpec
   with ShouldMatchers
   with BeforeAndAfterAll
   with MockitoSugar
@@ -19,43 +16,40 @@ class TwitterFeedConsumerSpec extends TestKit(ActorSystem("TwitterFeedSpec"))
 
   import TwitterFeedProtcol._
 
-  override def afterAll() = system.shutdown()
-
   val mockTwitterFeed = mock[TwitterStream]
 
-
-  "TwitterFeedConsumer" when {
-
-    "initialized" should {
-      "be inactive" in {
-        val actorRef = TestActorRef(Props(new TwitterFeedConsumer(mockTwitterFeed)))
+  "TwitterStreamConsumer" when {
+    "stopped" should {
+      "ignore a Stop message" in new ActorSystemFixture {
+        val actorRef = TestActorRef(Props(new TwitterStreamConsumer(mockTwitterFeed)))
+        actorRef ! Busy_?
+        expectMsg(Stopped)
+        actorRef ! Stop
+        expectNoMsg()
         actorRef ! Busy_?
         expectMsg(Stopped)
       }
+
+      "begin streaming Tweets with the filter from a Start message" in new ActorSystemFixture {
+        val actorRef = TestActorRef(Props(new TwitterStreamConsumer(mockTwitterFeed)))
+        actorRef ! Busy_?
+        expectMsg(Stopped)
+        val filter = List("#foo","#bar")
+        actorRef ! Start(filter)
+        expectMsg(Streaming(filter))
+        actorRef ! Busy_?
+        expectMsg(Streaming(filter))
+        verify(mockTwitterFeed).filter(new FilterQuery(0, Array.empty, filter.toArray))
+      }
     }
 
-    "stopped" should {
-      "do nothing for stop message" in {
-        val actorRef = TestActorRef(Props(new TwitterFeedConsumer(mockTwitterFeed)))
+    "streaming" should {
+      "stop reading the stream after a Stop message" in new ActorSystemFixture {
+        val actorRef = TestActorRef(Props(new TwitterStreamConsumer(mockTwitterFeed)))
         actorRef ! Stop
         actorRef ! Busy_?
         expectMsg(Stopped)
       }
-      "change to reading state for hashtag message" in {
-        val hashtag = "#foo"
-        val actorRef = TestActorRef(Props(new TwitterFeedConsumer(mockTwitterFeed)))
-        actorRef ! Start(hashtag)
-        actorRef ! Busy_?
-        expectMsg(Streaming(hashtag))
-
-        verify(mockTwitterFeed).addListener(anyObject[StatusListener])
-        verify(mockTwitterFeed).filter(new FilterQuery(0, Array.empty, Array(hashtag)))
-      }
-    }
-
-    "reading" should {
-      "send user for each tweet to the UserRegistry actor" in pending
-      "change to stopped state for stop message" in pending
     }
   }
 }
